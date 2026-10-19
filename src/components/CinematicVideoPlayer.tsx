@@ -41,9 +41,9 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
   const [narrationVol, setNarrationVol] = useState<number>(1.0);
   const [bgmVol, setBgmVol] = useState<number>(0.3);
 
-  // Dynamic scene duration tracking
-  const [sceneDurations, setSceneDurations] = useState<number[]>([6.5, 7.5, 6.0]);
-  const isNarrationSpeakingRef = useRef<boolean>(false);
+  // Generous durations ensuring full audio narration + comfortable breathing room
+  const [sceneDurations] = useState<number[]>([7.0, 7.5, 6.5]);
+  const totalDuration = sceneDurations.reduce((a, b) => a + b, 0); // 21.0s
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
@@ -52,7 +52,19 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
   const playedSegmentsRef = useRef<Set<number>>(new Set());
 
   const currentScene = BIBIMBAP_SCENES[currentSceneIndex] || BIBIMBAP_SCENES[0];
-  const totalDuration = sceneDurations.reduce((a, b) => a + b, 0);
+
+  // Map absolute time to scene index
+  const getSceneForTime = useCallback((time: number): { index: number; localTime: number } => {
+    let accumulated = 0;
+    for (let i = 0; i < sceneDurations.length; i++) {
+      const dur = sceneDurations[i];
+      if (time < accumulated + dur) {
+        return { index: i, localTime: time - accumulated };
+      }
+      accumulated += dur;
+    }
+    return { index: sceneDurations.length - 1, localTime: sceneDurations[sceneDurations.length - 1] };
+  }, [sceneDurations]);
 
   // Notify parent on scene change
   useEffect(() => {
@@ -67,7 +79,6 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
     setTtsStatus("Synthesizing studio voice with Gemini TTS...");
 
     try {
-      const newDurations = [...sceneDurations];
       for (let i = 0; i < BIBIMBAP_SCENES.length; i++) {
         const scene = BIBIMBAP_SCENES[i];
         const response = await fetch("/api/tts", {
@@ -84,12 +95,7 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
         if (response.ok) {
           const data = await response.json();
           if (data.success && data.audioBase64) {
-            audioEngine.cacheAudio(scene.id, data.audioBase64, (dur) => {
-              // Ensure scene duration gives full room for audio + comfortable 1.0s visual rest
-              const comfortableDuration = Math.max(dur + 1.2, scene.duration);
-              newDurations[i] = comfortableDuration;
-              setSceneDurations([...newDurations]);
-            });
+            audioEngine.cacheAudio(scene.id, data.audioBase64);
           }
         }
       }
@@ -106,29 +112,11 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
     fetchAllNarrationTts(selectedVoice);
   }, [fetchAllNarrationTts, selectedVoice]);
 
-  // Map absolute time to scene index based on dynamic sceneDurations
-  const getSceneForTime = useCallback((time: number): { index: number; localTime: number } => {
-    let accumulated = 0;
-    for (let i = 0; i < sceneDurations.length; i++) {
-      const dur = sceneDurations[i];
-      if (time < accumulated + dur) {
-        return { index: i, localTime: time - accumulated };
-      }
-      accumulated += dur;
-    }
-    return { index: sceneDurations.length - 1, localTime: sceneDurations[sceneDurations.length - 1] };
-  }, [sceneDurations]);
-
-  // Play narration safely ensuring it doesn't get cut off
+  // Play narration safely
   const playCurrentSceneNarration = useCallback((sceneIndex: number) => {
     const scene = BIBIMBAP_SCENES[sceneIndex];
     if (!scene) return;
-
-    isNarrationSpeakingRef.current = true;
-    audioEngine.playNarration(scene, () => {
-      // Called when audio finishes naturally
-      isNarrationSpeakingRef.current = false;
-    });
+    audioEngine.playNarration(scene);
   }, []);
 
   // Main playback loop
@@ -141,14 +129,8 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
       lastTimestampRef.current = timestamp;
 
       setCurrentTime((prevTime) => {
-        let nextTime = prevTime + deltaSec * playbackRate;
+        const nextTime = prevTime + deltaSec * playbackRate;
         const { index: nextSceneIdx } = getSceneForTime(nextTime);
-
-        // If trying to transition to next scene but current audio is still speaking, hold until finished!
-        if (nextSceneIdx > activeSceneRef.current && isNarrationSpeakingRef.current) {
-          // Stay on current scene until narration ends
-          return prevTime + deltaSec * 0.2; // Slow advance to prevent cut-off
-        }
 
         // Scene transition
         if (nextSceneIdx !== activeSceneRef.current) {
@@ -205,7 +187,6 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
       animFrameRef.current = null;
     }
     audioEngine.stopNarration();
-    isNarrationSpeakingRef.current = false;
   };
 
   const togglePlay = () => {
@@ -230,7 +211,6 @@ export const CinematicVideoPlayer: React.FC<CinematicVideoPlayerProps> = ({
       playCurrentSceneNarration(targetSceneIdx);
     } else {
       audioEngine.stopNarration();
-      isNarrationSpeakingRef.current = false;
     }
   };
 
